@@ -1,0 +1,11 @@
+[project]
+name = "klack"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.14"
+dependencies = [
+    "pynput>=1.7.7",
+    "pydub>=0.25.1",
+    "pygame",
+    "audioop-lts>=0.2.2",
+]
