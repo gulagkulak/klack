@@ -1,4 +1,4 @@
-# KLACK
+# K L A C K
 
 Inspired by the observation that people with ADHD do better when the sound of what they are doing is amplified.
 
@@ -8,7 +8,7 @@ Uses pygame to play keyboard sounds in an X11 desktop environment.
 
 ## Installation
 
-Install libsdl2. Needed by pygame to play sounds. Clone this repo. Then:
+Install uv. Install libsdl2. Needed by pygame to play sounds. Clone this repo. Then:
 
 ```shell
 uv sync
