@@ -1,11 +1,14 @@
 [project]
 name = "klack"
-version = "0.1.0"
-description = "Add your description here"
+version = "0.2.0"
+description = "Keyboard click sounds with system tray control"
 requires-python = ">=3.14"
 dependencies = [
     "pynput>=1.7.7",
     "pydub>=0.25.1",
     "pygame",
     "audioop-lts>=0.2.2",
+    "pystray>=0.19.5",
+    "pillow>=9.0.0",
+    "pygobject>=3.46.0",
 ]

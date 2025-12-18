@@ -3,12 +3,23 @@ import random
 import threading
 import time
 from pathlib import Path
+import signal
 from dataclasses import dataclass
 from typing import List, Optional, Any
 
+# Force GTK backend for pystray BEFORE importing it
+# AppIndicator doesn't work in Cinnamon without the appindicator applet
+if not os.getenv('PYSTRAY_BACKEND'):
+    os.environ['PYSTRAY_BACKEND'] = 'gtk'
+    print(f"[tray debug] Set PYSTRAY_BACKEND=gtk before importing pystray")
+
 import pygame
+import pystray
 from pynput import keyboard
 from pydub import AudioSegment
+from PIL import Image
+
+print(f"[tray debug] After import, pystray backend would be: {os.getenv('PYSTRAY_BACKEND')}")
 
 # =====================
 # Configuration
@@ -125,6 +136,8 @@ class SoundPool:
             print("pygame.mixer playback failed:", e)
 
     def on_press(self, key):
+        if not sound_enabled():
+            return
         if IGNORE_KEY_REPEAT:
             now = time.time()
             k = getattr(key, "vk", None) or getattr(key, "value", None) or str(key)
@@ -138,6 +151,8 @@ class SoundPool:
         ).start()
 
     def on_release(self, key):
+        if not sound_enabled():
+            return
         if IGNORE_KEY_REPEAT:
             now = time.time()
             k = getattr(key, "vk", None) or getattr(key, "value", None) or str(key)
@@ -185,8 +200,160 @@ def _init_pygame_mixer():
             pass
 
 
+_sound_enabled_flag = True  # Start with sound enabled
+_state_lock = threading.Lock()
+_stop_event = threading.Event()
+_tray_icon: Optional[pystray.Icon] = None
+
+
+def sound_enabled() -> bool:
+    with _state_lock:
+        return _sound_enabled_flag
+
+
+def set_sound_enabled(val: bool) -> None:
+    global _sound_enabled_flag
+    with _state_lock:
+        _sound_enabled_flag = val
+
+
+def _get_icon_path() -> Path:
+    """Return path to icon file. Prefer PNG for better compatibility."""
+    # PNG works better with GTK StatusIcon
+    png_path = PROJECT_ROOT / "icon.png"
+    if png_path.exists():
+        return png_path
+    # Fallback to SVG (works with AppIndicator)
+    svg_path = PROJECT_ROOT / "icon.svg"
+    if svg_path.exists():
+        return svg_path
+    return None
+
+
+def _toggle_sound_action(icon, item):
+    set_sound_enabled(not sound_enabled())
+    # Update menu checkmark/state by recreating and refreshing the menu
+    icon.menu = _build_menu()
+    try:
+        icon.update_menu()
+    except Exception:
+        # Some backends update automatically when menu is reassigned
+        pass
+
+
+def _quit_action(icon, item):
+    _stop_event.set()
+    try:
+        icon.visible = False
+    except Exception:
+        pass
+    try:
+        icon.stop()
+    except Exception:
+        pass
+
+
+def _build_menu() -> pystray.Menu:
+    toggle_text = "Toggle Sound"
+    # Use checked state based on current flag
+    return pystray.Menu(
+        pystray.MenuItem(
+            toggle_text,
+            _toggle_sound_action,
+            checked=lambda item: sound_enabled(),
+            default=True,  # Primary click activates toggle on some backends
+        ),
+        pystray.MenuItem("Quit", _quit_action),
+    )
+
+
+def _backend_name() -> str:
+    try:
+        impl = getattr(pystray, "_impl", None)
+        print(f"[tray debug] pystray._impl = {impl}")
+        if impl is None:
+            # Try to detect what pystray would use
+            try:
+                import gi
+                print(f"[tray debug] gi (PyGObject) available: {gi}")
+            except ImportError:
+                print("[tray debug] gi (PyGObject) NOT available")
+            return "unknown"
+        name = getattr(impl, "__name__", str(impl))
+        print(f"[tray debug] backend name = {name}")
+        return name
+    except Exception as e:
+        print(f"[tray debug] Exception getting backend: {e}")
+        return "unknown"
+
+
+def _tray_setup(icon: pystray.Icon):
+    # Ensure properties are set from within setup for GTK/AppIndicator
+    try:
+        backend = _backend_name()
+        print(f"[tray] setup backend={backend}")
+    except Exception as e:
+        print(f"[tray] Exception in _backend_name: {e}")
+        backend = "unknown"
+
+    # Load icon as PIL Image (required by pystray GTK backend)
+    icon_path = _get_icon_path()
+    print(f"[tray debug] icon_path = {icon_path}")
+    print(f"[tray debug] icon_path exists = {icon_path.exists() if icon_path else 'N/A'}")
+
+    if icon_path and icon_path.exists():
+        print(f"[tray debug] Loading icon as PIL Image from: {icon_path}")
+        try:
+            pil_image = Image.open(icon_path)
+            print(f"[tray debug] PIL Image loaded: size={pil_image.size}, mode={pil_image.mode}")
+            icon.icon = pil_image
+            print(f"[tray debug] icon.icon set to PIL Image successfully")
+        except Exception as e:
+            print(f"[tray debug] Failed to load icon as PIL Image: {e}")
+    else:
+        print("[tray] Warning: icon file not found, tray icon may not display properly")
+
+    icon.title = "Klack"
+    print(f"[tray debug] Set icon.title to: {icon.title}")
+    icon.menu = _build_menu()
+    print(f"[tray debug] Set icon.menu to: {icon.menu}")
+
+    # Force visibility
+    try:
+        icon.visible = True
+        print(f"[tray debug] Set icon.visible = True")
+    except Exception as e:
+        print(f"[tray debug] Could not set icon.visible: {e}")
+
+
+def _run_tray_mainloop():
+    """Create the tray icon and run it on the main thread.
+    Many GTK/AppIndicator environments require the UI loop to be on the main thread
+    for menus to work reliably (e.g., Cinnamon, GNOME).
+    """
+    global _tray_icon
+
+    print(f"[tray debug] Creating pystray.Icon...")
+    print(f"[tray debug] PYSTRAY_BACKEND env = {os.getenv('PYSTRAY_BACKEND', '(not set)')}")
+
+    _tray_icon = pystray.Icon("klack")
+    print(f"[tray debug] Icon created: {_tray_icon}")
+    print(f"[tray debug] Icon type: {type(_tray_icon)}")
+    print(f"[tray debug] Icon class module: {type(_tray_icon).__module__}")
+    print(f"[tray] backend={_backend_name()}")
+
+    # Check what's actually available in pystray
+    print(f"[tray debug] pystray module file: {pystray.__file__}")
+    print(f"[tray debug] pystray version: {getattr(pystray, '__version__', 'unknown')}")
+
+    print(f"[tray debug] Starting icon.run()...")
+    _tray_icon.run(setup=_tray_setup)
+
+
 def main():
-    print("Klack: global key sounds using X11 (pynput). Press Ctrl+C to quit.")
+    print(
+        "Klack: global key sounds using X11 (pynput). Right-click tray icon for menu. Press Ctrl+C to quit."
+    )
     # Initialize pygame mixer first
     try:
         _init_pygame_mixer()
@@ -214,15 +381,31 @@ def main():
     listener = keyboard.Listener(on_press=pool.on_press, on_release=pool.on_release)
     listener.start()
 
+    # Signal handlers for clean quit
+    def _handle_sig(signum, frame):
+        _stop_event.set()
+        # Request the tray loop to stop from a separate thread to avoid signal/GTK issues
+        if _tray_icon is not None:
+            threading.Thread(target=lambda: _tray_icon.stop(), daemon=True).start()
+
     try:
-        while listener.is_alive():
-            time.sleep(0.2)
-    except KeyboardInterrupt:
-        print("\nExiting...")
-    finally:
-        listener.stop()
+        signal.signal(signal.SIGINT, _handle_sig)
+        signal.signal(signal.SIGTERM, _handle_sig)
+    except Exception:
+        pass
+
+    # Run the tray UI loop on the main thread; this returns when icon.stop() is called
+    _run_tray_mainloop()
+    # Clean shutdown after the tray loop has stopped
+    listener.stop()
+    try:
+        pygame.mixer.quit()
+    except Exception:
+        pass
+    if _tray_icon is not None:
         try:
-            pygame.mixer.quit()
+            _tray_icon.visible = False
+            _tray_icon.stop()
         except Exception:
             pass
 
